@@ -25,10 +25,39 @@ import {
   FileCheck,
 } from 'lucide-react';
 
+// Hosted and local backend constants
+const RENDER_BACKEND_URL = 'https://cnnautoencoder-backend.onrender.com';
+const LOCAL_BACKEND_URL = 'http://localhost:8000';
+
+const getInitialApiUrl = () => {
+  // 1. Explicit build-time or runtime environment variable
+  if (import.meta.env.VITE_API_URL) {
+    return import.meta.env.VITE_API_URL;
+  }
+  // 2. Saved user preference from localStorage
+  if (typeof window !== 'undefined') {
+    try {
+      const saved = localStorage.getItem('neuroclean_api_url');
+      if (saved) {
+        const isLocalHost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+        // If user is accessing the hosted domain (e.g. Netlify) and had localhost saved, migrate them to cloud backend
+        if (!isLocalHost && (saved.includes('localhost') || saved.includes('127.0.0.1'))) {
+          return RENDER_BACKEND_URL;
+        }
+        return saved;
+      }
+    } catch {
+      // Ignore localStorage access restrictions
+    }
+  }
+  // 3. Default to the cloud backend hosted on Render
+  return RENDER_BACKEND_URL;
+};
+
 export default function App() {
   // Configuration State
-  const defaultApiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000'|| "https://cnnautoencoder-backend.onrender.com/";
-  const [apiUrl, setApiUrl] = useState(defaultApiUrl);
+  const [apiUrl, setApiUrl] = useState(getInitialApiUrl);
+  const [isWakingUp, setIsWakingUp] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showArchitectureModal, setShowArchitectureModal] = useState(false);
   const [backendStatus, setBackendStatus] = useState('checking'); // 'online' | 'offline' | 'checking'
@@ -70,12 +99,48 @@ export default function App() {
     }, 3500);
   };
 
+  // Helper to update and persist API URL
+  const handleUpdateApiUrl = (newUrl, shouldTest = true) => {
+    setApiUrl(newUrl);
+    try {
+      localStorage.setItem('neuroclean_api_url', newUrl);
+    } catch {
+      // Ignore
+    }
+    if (shouldTest) {
+      checkHealth(newUrl);
+    }
+  };
+
   // Check Backend Health and fetch model info
   const checkHealth = useCallback(async (urlToCheck) => {
     setBackendStatus('checking');
+    const targetUrl = urlToCheck || RENDER_BACKEND_URL;
+    const isRender = targetUrl.includes('onrender.com');
+    setIsWakingUp(false);
+
+    // If on Render, trigger waking up status after 2.5 seconds
+    const wakeTimer = setTimeout(() => {
+      if (isRender) {
+        setIsWakingUp(true);
+      }
+    }, 2500);
+
+    const controller = new AbortController();
+    const abortTimer = setTimeout(() => {
+      controller.abort();
+    }, 75000); // 75s cold start allowance
+
     try {
-      const cleanUrl = urlToCheck.replace(/\/$/, '');
-      const response = await fetch(`${cleanUrl}/`, { method: 'GET' });
+      const cleanUrl = targetUrl.replace(/\/$/, '');
+      const response = await fetch(`${cleanUrl}/`, { 
+        method: 'GET',
+        signal: controller.signal,
+      });
+      clearTimeout(wakeTimer);
+      clearTimeout(abortTimer);
+      setIsWakingUp(false);
+
       if (response.ok) {
         setBackendStatus('online');
         // Fetch model architecture info
@@ -92,6 +157,9 @@ export default function App() {
         setBackendStatus('offline');
       }
     } catch {
+      clearTimeout(wakeTimer);
+      clearTimeout(abortTimer);
+      setIsWakingUp(false);
       setBackendStatus('offline');
     }
   }, []);
@@ -461,8 +529,13 @@ export default function App() {
       );
     } catch (err) {
       console.error('API Inference Error:', err);
+      const isRender = apiUrl.includes('onrender.com');
       setErrorMsg(
-        `Processing failed: ${err.message}. Please verify the FastAPI backend is running at ${apiUrl}`
+        `Processing failed: ${err.message}. ${
+          isRender
+            ? 'If the Render backend was sleeping, it may still be warming up (~30–60s). Please wait a moment and try again.'
+            : `Please verify the FastAPI backend is running at ${apiUrl}`
+        }`
       );
       setBackendStatus('offline');
     } finally {
@@ -596,7 +669,13 @@ export default function App() {
                     : 'bg-amber-400 animate-ping'
                 }`}
               />
-              <span className="capitalize">{backendStatus}</span>
+              <span className="capitalize">
+                {backendStatus === 'checking'
+                  ? isWakingUp
+                    ? 'Waking Up...'
+                    : 'Connecting...'
+                  : backendStatus}
+              </span>
             </div>
 
             {/* Settings Toggle */}
@@ -617,26 +696,66 @@ export default function App() {
         {/* Collapsible API Configuration Drawer */}
         {showSettings && (
           <div className="border-t border-slate-800/80 bg-slate-900/95 px-4 sm:px-6 lg:px-8 py-3.5 shadow-xl transition-all">
-            <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center gap-3">
-              <div className="flex items-center gap-2 text-xs font-medium text-slate-300 whitespace-nowrap">
-                <Activity className="w-3.5 h-3.5 text-cyan-400" />
-                <span>FastAPI Service URL:</span>
+            <div className="max-w-7xl mx-auto flex flex-col gap-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-xs font-medium text-slate-300 whitespace-nowrap">
+                  <Activity className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>FastAPI Service URL:</span>
+                </div>
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="text-slate-400 text-[11px]">Presets:</span>
+                  <button
+                    type="button"
+                    onClick={() => handleUpdateApiUrl(RENDER_BACKEND_URL)}
+                    className={`px-2.5 py-1 rounded-md border text-xs font-medium transition ${
+                      apiUrl === RENDER_BACKEND_URL
+                        ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40'
+                        : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-slate-200 hover:border-slate-700'
+                    }`}
+                  >
+                    Cloud (Render)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleUpdateApiUrl(LOCAL_BACKEND_URL)}
+                    className={`px-2.5 py-1 rounded-md border text-xs font-medium transition ${
+                      apiUrl === LOCAL_BACKEND_URL
+                        ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40'
+                        : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-slate-200 hover:border-slate-700'
+                    }`}
+                  >
+                    Local (Port 8000)
+                  </button>
+                </div>
               </div>
-              <div className="flex-1 w-full flex items-center gap-2">
+
+              <div className="flex-1 w-full flex flex-col sm:flex-row items-center gap-2">
                 <input
                   type="text"
                   value={apiUrl}
-                  onChange={(e) => setApiUrl(e.target.value)}
-                  placeholder="http://localhost:8000"
+                  onChange={(e) => handleUpdateApiUrl(e.target.value, false)}
+                  placeholder="https://cnnautoencoder-backend.onrender.com"
                   className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-cyan-500 font-mono"
                 />
                 <button
+                  type="button"
                   onClick={() => checkHealth(apiUrl)}
-                  className="px-3.5 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-xs text-white font-medium flex items-center gap-1.5 transition flex-shrink-0"
+                  disabled={backendStatus === 'checking'}
+                  className="w-full sm:w-auto px-3.5 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-xs text-white font-medium flex items-center justify-center gap-1.5 transition flex-shrink-0"
                 >
-                  <RefreshCw className="w-3 h-3" /> Test Connection
+                  <RefreshCw className={`w-3 h-3 ${backendStatus === 'checking' ? 'animate-spin' : ''}`} />
+                  {backendStatus === 'checking' ? 'Testing...' : 'Test Connection'}
                 </button>
               </div>
+
+              {apiUrl.includes('onrender.com') && (
+                <div className="text-[11px] text-slate-400 flex items-center gap-1.5">
+                  <Info className="w-3.5 h-3.5 text-cyan-400 flex-shrink-0" />
+                  <span>
+                    Render Free Tier suspends idle instances after 15 minutes. Cold boot spin-up takes ~30–60 seconds on the first ping.
+                  </span>
+                </div>
+              )}
             </div>
           </div>
         )}
