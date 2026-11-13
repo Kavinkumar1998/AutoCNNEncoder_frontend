@@ -537,7 +537,7 @@ export default function App() {
             : `Please verify the FastAPI backend is running at ${apiUrl}`
         }`
       );
-      setBackendStatus('offline');
+      checkHealth(apiUrl);
     } finally {
       setIsProcessing(false);
     }
